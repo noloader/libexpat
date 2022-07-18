@@ -29,6 +29,7 @@
 # Copyright (c) 2020      Gulliver <gulliver@traumkristalle.net>
 # Copyright (c) 2020      Thomas Beutlich <tc@tbeu.de>
 # Copyright (c) 2021      Alex Richardson <Alexander.Richardson@cl.cam.ac.uk>
+# Copyright (c) 2022      Johnny Jazeix <jazeix@gmail.com>
 # Unlike most of Expat,
 # this file is copyrighted under the BSD-license for buildsystem files of KDE.
 
@@ -64,7 +65,7 @@ endif()
 
 project(expat
     VERSION
-        2.4.6
+        2.4.8
     LANGUAGES
         C
 )
@@ -413,7 +414,7 @@ if(EXPAT_WITH_LIBBSD)
 endif()
 
 set(LIBCURRENT 9)   # sync
-set(LIBREVISION 6)  # with
+set(LIBREVISION 8)  # with
 set(LIBAGE 8)       # configure.ac!
 math(EXPR LIBCURRENT_MINUS_AGE "${LIBCURRENT} - ${LIBAGE}")
 
@@ -421,6 +422,18 @@ if(NOT WIN32)
     set_property(TARGET expat PROPERTY VERSION ${LIBCURRENT_MINUS_AGE}.${LIBAGE}.${LIBREVISION})
     set_property(TARGET expat PROPERTY SOVERSION ${LIBCURRENT_MINUS_AGE})
     set_property(TARGET expat PROPERTY NO_SONAME ${NO_SONAME})
+
+    if(APPLE)
+        if(NOT CMAKE_VERSION VERSION_GREATER_EQUAL 3.17)
+            message(FATAL_ERROR "Expat requires CMake >=3.17 on platform \"APPLE\".")
+        endif()
+
+        # NOTE: This intends to talk CMake into compatiblity with GNU Libtool
+        math(EXPR _EXPAT_MACHO_COMPATIBILITY_VERSION "${LIBCURRENT} + 1")
+        set(_EXPAT_MACHO_CURRENT_VERSION "${_EXPAT_MACHO_COMPATIBILITY_VERSION}.${LIBREVISION}")
+        set_property(TARGET expat PROPERTY MACHO_COMPATIBILITY_VERSION ${_EXPAT_MACHO_COMPATIBILITY_VERSION})
+        set_property(TARGET expat PROPERTY MACHO_CURRENT_VERSION ${_EXPAT_MACHO_CURRENT_VERSION})
+    endif()
 endif()
 if(WIN32 AND NOT MINGW)
     # NOTE: This avoids a name collision with Expat.dll of Perl's XML::Parser::Expat
@@ -429,7 +442,10 @@ if(WIN32 AND NOT MINGW)
     # NOTE: "set_property(TARGET expat PROPERTY PREFIX lib)" would only affect *.dll
     #       files but not *.lib files, so we have to rely on property OUTPUT_NAME, instead.
     #       Property CMAKE_*_POSTFIX still applies.
-    set_property(TARGET expat PROPERTY OUTPUT_NAME libexpat)
+    set(_EXPAT_OUTPUT_NAME libexpat)
+    set_property(TARGET expat PROPERTY OUTPUT_NAME ${_EXPAT_OUTPUT_NAME})
+else()
+    set(_EXPAT_OUTPUT_NAME expat)
 endif()
 
 target_include_directories(expat
@@ -439,12 +455,8 @@ target_include_directories(expat
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
-if(WIN32)
-    if(EXPAT_SHARED_LIBS)
-        target_compile_definitions(expat PRIVATE VER_FILEVERSION=${_EXPAT_DLL_VERSION})
-    else()
-        target_compile_definitions(expat PUBLIC -DXML_STATIC)
-    endif()
+if(WIN32 AND EXPAT_SHARED_LIBS)
+    target_compile_definitions(expat PRIVATE VER_FILEVERSION=${_EXPAT_DLL_VERSION})
 endif()
 
 expat_install(TARGETS expat EXPORT expat
@@ -481,6 +493,7 @@ if(EXPAT_BUILD_PKGCONFIG)
         string(TOLOWER "${_build_type}" _build_type_lower)
         string(TOUPPER "${_build_type}" _build_type_upper)
         set_property(TARGET expat PROPERTY "pkgconfig_${_build_type_lower}_name" "expat${CMAKE_${_build_type_upper}_POSTFIX}")
+        set_property(TARGET expat PROPERTY "pkgconfig_${_build_type_lower}_output_name" "${_EXPAT_OUTPUT_NAME}${CMAKE_${_build_type_upper}_POSTFIX}")
         if(_EXPAT_LIBM_FOUND)
             set_property(TARGET expat PROPERTY "pkgconfig_libm" "-lm")
         else()
@@ -577,25 +590,27 @@ if(EXPAT_BUILD_TESTS)
         endif()
     endfunction()
 
-    add_executable(runtests tests/runtests.c ${test_SRCS})
-    set_property(TARGET runtests PROPERTY RUNTIME_OUTPUT_DIRECTORY tests)
-    expat_add_test(runtests $<TARGET_FILE:runtests>)
-
+    set(_EXPAT_TEST_TARGETS runtests runtestspp)
+    add_executable(runtests   tests/runtests.c     ${test_SRCS})
     add_executable(runtestspp tests/runtestspp.cpp ${test_SRCS})
-    set_property(TARGET runtestspp PROPERTY RUNTIME_OUTPUT_DIRECTORY tests)
-    expat_add_test(runtestspp $<TARGET_FILE:runtestspp>)
 
-    if(_EXPAT_LIBM_FOUND)
-        target_link_libraries(runtests m)
-        target_link_libraries(runtestspp m)
-    endif()
+    foreach(_target ${_EXPAT_TEST_TARGETS})
+        set_property(TARGET ${_target} PROPERTY RUNTIME_OUTPUT_DIRECTORY tests)
+        expat_add_test(${_target} $<TARGET_FILE:${_target}>)
 
-    if(EXPAT_WITH_LIBBSD)
-        target_link_libraries(runtests ${LIB_BSD})
-        target_link_libraries(runtestspp ${LIB_BSD})
-    endif()
+        if(_EXPAT_LIBM_FOUND)
+            target_link_libraries(${_target} m)
+        endif()
+
+        if(EXPAT_WITH_LIBBSD)
+            target_link_libraries(${_target} ${LIB_BSD})
+        endif()
+    endforeach()
 endif()
 
+#
+# Fuzzers
+#
 if(EXPAT_BUILD_FUZZERS)
     if(NOT "${CMAKE_C_COMPILER_ID}" STREQUAL "Clang")
         message(SEND_ERROR
@@ -661,6 +676,23 @@ else()
                 "This is likely in error - consider adding "
                 "-DEXPAT_BUILD_FUZZERS=ON to your cmake execution.")
     endif()
+endif()
+
+#
+# C/C++ config affecting multiple targets
+#
+if(WIN32)
+    set(_EXPAT_STATIC_TARGETS ${_EXPAT_TEST_TARGETS})
+    if(NOT EXPAT_SHARED_LIBS)
+        list(APPEND _EXPAT_STATIC_TARGETS expat)
+    endif()
+    if(EXPAT_BUILD_FUZZERS)
+        list(APPEND _EXPAT_STATIC_TARGETS fuzzpat)
+    endif()
+
+    foreach(_target ${_EXPAT_STATIC_TARGETS})
+        target_compile_definitions(${_target} PUBLIC -DXML_STATIC)
+    endforeach()
 endif()
 
 #
